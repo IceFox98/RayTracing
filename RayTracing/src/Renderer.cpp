@@ -34,12 +34,20 @@ void Renderer::OnResize(uint32_t width, uint32_t height)
 
 	delete[] m_ImageData;
 	m_ImageData = new uint32_t[width * height]; // Create array of pixels
+
+
+	delete[] m_AccumulationData;
+	m_AccumulationData = new glm::vec4[width * height];
 }
 
 void Renderer::Render(const Scene& scene, const Camera& camera)
 {
 	m_ActiveScene = &scene;
 	m_ActiveCamera = &camera;
+
+	// Initialize accumulation array
+	if (m_FrameIndex == 1)
+		memset(m_AccumulationData, 0, m_FinalImage->GetWidth() * m_FinalImage->GetHeight() * sizeof(glm::vec4));
 
 	// We start with the y because of the CPU memory buffer layout:
 	// As we go one uint32_t forward in memory, we are going horizontally across the image
@@ -49,16 +57,25 @@ void Renderer::Render(const Scene& scene, const Camera& camera)
 	{
 		for (uint32_t x = 0; x < m_FinalImage->GetWidth(); x++)
 		{
-
 			glm::vec4 color = PerPixel(x, y); // Called per pixel
-			color = glm::clamp(color, glm::vec4(0.0f), glm::vec4(1.0f));
+			m_AccumulationData[x + y * m_FinalImage->GetWidth()] += color;
+
+			glm::vec4 accumulatedColor = m_AccumulationData[x + y * m_FinalImage->GetWidth()];
+			accumulatedColor /= (float)m_FrameIndex; // Divide by FrameIndex to create an average color
+
+			accumulatedColor = glm::clamp(accumulatedColor, glm::vec4(0.0f), glm::vec4(1.0f));
 
 			// Multiply y by width to get the n-row of the buffer
-			m_ImageData[x + y * m_FinalImage->GetWidth()] = Utils::ConvertToRGBA(color);
+			m_ImageData[x + y * m_FinalImage->GetWidth()] = Utils::ConvertToRGBA(accumulatedColor);
 		}
 	}
 
 	m_FinalImage->SetData(m_ImageData); // Upload data to the GPU
+
+	if (m_Settings.Accumulate)
+		m_FrameIndex++;
+	else
+		m_FrameIndex = 1;
 }
 
 glm::vec4 Renderer::PerPixel(uint32_t x, uint32_t y)
@@ -69,7 +86,7 @@ glm::vec4 Renderer::PerPixel(uint32_t x, uint32_t y)
 
 	glm::vec3 color(0.0f);
 
-	int bounces = 2; // Bounces to allow reflection
+	int bounces = 5; // Bounces to allow reflection
 	float multiplier = 1.0f;
 
 	for (int i = 0; i < bounces; i++)
@@ -78,7 +95,7 @@ glm::vec4 Renderer::PerPixel(uint32_t x, uint32_t y)
 
 		if (payload.HitDistance < 0.0f) // If ray misses
 		{
-			glm::vec3 skyColor = glm::vec3(0.0f, 0.0f, 0.0f);
+			glm::vec3 skyColor = glm::vec3(0.6f, 0.7f, 0.9f);
 			color += skyColor * multiplier;
 			break;
 		}
@@ -88,17 +105,20 @@ glm::vec4 Renderer::PerPixel(uint32_t x, uint32_t y)
 		float lightIntensity = glm::max(glm::dot(payload.WorldNormal, -lightDir), 0.0f); // == cos(angle)
 
 		const Sphere& sphere = m_ActiveScene->Spheres[payload.ObjectIndex];
+		const Material& material = m_ActiveScene->Materials[sphere.MaterialIndex];
 
-		glm::vec3 sphereColor = sphere.Albedo;
+		glm::vec3 sphereColor = material.Albedo;
 		sphereColor *= lightIntensity;
 		color += sphereColor * multiplier;
 
-		multiplier *= 0.7f;
+		multiplier *= 0.5f;
 
 		// This will allow the reflection
 		// We need to move the hit position a little bit further to avoid that the next trace collides with the sphere itself
 		ray.Origin = payload.WorldPosition + payload.WorldNormal * 0.0001f;
-		ray.Direction = glm::reflect(ray.Direction, payload.WorldNormal);
+
+		ray.Direction = glm::reflect(ray.Direction,
+			payload.WorldNormal + material.Roughness * Walnut::Random::Vec3(-0.5f, 0.5f));
 	}
 
 	return glm::vec4(color, 1.0f);
